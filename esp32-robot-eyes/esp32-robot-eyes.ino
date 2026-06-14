@@ -16,7 +16,7 @@
 #define OLED_RESET     -1
 #define OLED_ADDRESS 0x3C
 
-#define FIRMWARE_VERSION "1.0.2"
+#define FIRMWARE_VERSION "1.0.3"
 #define GITHUB_USER      "IamFishR"
 #define GITHUB_REPO      "esp32-robot-eyes"
 
@@ -105,19 +105,27 @@ void checkForUpdate() {
   }
   if (binUrl.isEmpty()) return;
 
-  // download & flash
+  // download & flash — follow GitHub redirects
   WiFiClientSecure dl;
   dl.setInsecure();
   HTTPClient dlHttp;
+  dlHttp.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  dlHttp.setTimeout(30000);
   if (!dlHttp.begin(dl, binUrl)) return;
 
   int dlCode = dlHttp.GET();
+  Serial.printf("OTA download HTTP code: %d\n", dlCode);
   if (dlCode != 200) { dlHttp.end(); return; }
 
   int len = dlHttp.getSize();
-  if (!Update.begin(len)) { dlHttp.end(); return; }
+  Serial.printf("OTA firmware size: %d\n", len);
 
-  // show updating screen
+  if (!Update.begin(len > 0 ? len : UPDATE_SIZE_UNKNOWN)) {
+    Serial.println("OTA Update.begin failed");
+    dlHttp.end();
+    return;
+  }
+
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
@@ -125,10 +133,16 @@ void checkForUpdate() {
   display.print("Updating firmware...");
   display.display();
 
-  Update.writeStream(*dlHttp.getStreamPtr());
+  size_t written = Update.writeStream(*dlHttp.getStreamPtr());
+  Serial.printf("OTA written: %d bytes\n", written);
   dlHttp.end();
 
-  if (Update.end(true)) ESP.restart();
+  if (Update.end(true)) {
+    Serial.println("OTA success - rebooting");
+    ESP.restart();
+  } else {
+    Serial.printf("OTA failed: %s\n", Update.errorString());
+  }
 }
 
 // ---- Setup ----
