@@ -1,4 +1,6 @@
 #include <Wire.h>
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <WiFi.h>
@@ -128,12 +130,18 @@ void checkForUpdate() {
 }
 
 // ---- Setup ----
+void initVariant() {
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // disable before framework init
+}
+
 void setup() {
   Serial.begin(115200);
 
-  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
-    Serial.println("OLED not found");
-    while (1);
+  // Try 0x3C first, then 0x3D
+  bool oledOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  if (!oledOk) oledOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
+  if (!oledOk) {
+    Serial.println("OLED not found on 0x3C or 0x3D - running without display");
   }
 
   display.clearDisplay();

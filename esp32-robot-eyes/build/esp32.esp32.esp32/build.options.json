@@ -1,0 +1,9 @@
+{
+  "additionalFiles": "",
+  "compiler.optimization_flags": "-Os",
+  "customBuildProperties": "",
+  "fqbn": "esp32:esp32:esp32",
+  "hardwareFolders": "/home/rakesh/.arduino15/packages/esp32/hardware/esp32/3.3.10,/home/rakesh/.arduino15/packages/esp32/hardware/esp32/3.3.10",
+  "otherLibrariesFolders": "/home/rakesh/Arduino/libraries",
+  "sketchLocation": "/home/rakesh/Dev/esp32-robot-eyes/esp32-robot-eyes"
+}
