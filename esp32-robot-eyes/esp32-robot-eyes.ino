@@ -16,7 +16,7 @@
 #define OLED_RESET     -1
 #define OLED_ADDRESS 0x3C
 
-#define FIRMWARE_VERSION "1.0.3"
+#define FIRMWARE_VERSION "1.0.4"
 #define GITHUB_USER      "IamFishR"
 #define GITHUB_REPO      "esp32-robot-eyes"
 
