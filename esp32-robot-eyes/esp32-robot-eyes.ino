@@ -14,9 +14,8 @@
 #define SCREEN_WIDTH  128
 #define SCREEN_HEIGHT  64
 #define OLED_RESET     -1
-#define OLED_ADDRESS 0x3C
 
-#define FIRMWARE_VERSION "1.0.4"
+#define FIRMWARE_VERSION "1.1.0"
 #define GITHUB_USER      "IamFishR"
 #define GITHUB_REPO      "esp32-robot-eyes"
 
@@ -26,51 +25,361 @@ const char* password = "air52651";
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 WebServer server(80);
 
-// ---- Eye state ----
-int pupilDX = 0, pupilDY = 0;
-bool blinking      = false;
-int  blinkFrame    = 0;
+// ── Eye geometry ──────────────────────────────────────────────────────────────
+#define LEX  34   // left eye center X
+#define REX  94   // right eye center X
+#define EY   28   // eye center Y
+#define EW   13   // eye horizontal radius
+#define EH   10   // eye vertical radius
+#define PR    7   // pupil radius
 
-unsigned long lastBlink   = 0;
-unsigned long lastLook    = 0;
+// ── Expressions ───────────────────────────────────────────────────────────────
+enum Expression {
+  EXPR_FRONT = 0, EXPR_NARROW, EXPR_WIDE, EXPR_CROSSED, EXPR_MIDDLE,
+  EXPR_DOWN, EXPR_UP, EXPR_RIGHT, EXPR_RIGHT_DOWN, EXPR_RIGHT_UP,
+  EXPR_LEFT, EXPR_LEFT_DOWN, EXPR_LEFT_UP,
+  EXPR_CONFUSED1, EXPR_CONFUSED2,
+  EXPR_CRY, EXPR_DISTRESSED, EXPR_GLARE, EXPR_MAD,
+  EXPR_GLASSES, EXPR_SLEEP, EXPR_TIRED, EXPR_NIGHT,
+  EXPR_UPPER_LIDS, EXPR_LOWER_LIDS, EXPR_BLANK,
+  EXPR_WORD_HELLO, EXPR_WORD_BYE, EXPR_WORD_WHAT,
+  EXPR_COUNT
+};
+
+const char* exprNames[] = {
+  "FRONT","NARROW","WIDE","CROSSED","MIDDLE",
+  "DOWN","UP","RIGHT","RIGHT_DOWN","RIGHT_UP",
+  "LEFT","LEFT_DOWN","LEFT_UP",
+  "CONFUSED1","CONFUSED2",
+  "CRY","DISTRESSED","GLARE","MAD",
+  "GLASSES","SLEEP","TIRED","NIGHT",
+  "UPPER_LIDS","LOWER_LIDS","BLANK",
+  "HELLO","BYE","WHAT"
+};
+
+// ── State ─────────────────────────────────────────────────────────────────────
+Expression currentExpr  = EXPR_WORD_HELLO;
+unsigned long exprStart = 0;
+unsigned long exprDur   = 2000;
+
+bool blinking           = false;
+int  blinkFrame         = 0;
+unsigned long lastBlink    = 0;
 unsigned long lastOtaCheck = 0;
 
-// ---- Draw one eye ----
-// cx,cy = centre   ew,eh = outer ellipse   pr = pupil radius   blinkPct 0..10
-void drawEye(int cx, int cy, int ew, int eh, int pr, int blinkPct) {
+// ── Low-level helpers ─────────────────────────────────────────────────────────
+
+void drawEyeStd(int cx, int cy, int ew, int eh, int pr,
+                int pdx, int pdy, int blinkPct) {
   int h = eh - (eh * blinkPct / 10);
-  if (h < 2) h = 2;
-
+  if (h < 1) h = 1;
   display.fillEllipse(cx, cy, ew, h, WHITE);
-
-  int py = cy + (pupilDY * h / eh);
-  display.fillCircle(cx + pupilDX, py, pr, BLACK);
-
-  // small highlight dot
-  display.fillCircle(cx + pupilDX - 3, py - 3, 2, WHITE);
+  int py = cy + (pdy * h / eh);
+  display.fillCircle(cx + pdx, py, pr, BLACK);
+  display.fillCircle(cx + pdx - 2, py - 2, 2, WHITE);
 }
 
-void drawFace(int blinkPct) {
-  display.clearDisplay();
-  drawEye(34, 28, 13, 10, 7, blinkPct);
-  drawEye(94, 28, 13, 10, 7, blinkPct);
+void drawTear(int x, int y) {
+  display.drawLine(x, y, x, y + 7, WHITE);
+  display.drawPixel(x - 1, y + 5, WHITE);
+  display.drawPixel(x + 1, y + 5, WHITE);
+  display.drawPixel(x - 1, y + 6, WHITE);
+  display.drawPixel(x + 1, y + 6, WHITE);
 }
 
-// ---- Time strip at bottom ----
-void drawTime() {
-  struct tm t;
-  if (!getLocalTime(&t)) return;
+void drawCrescent(int cx, int cy, int r) {
+  display.fillCircle(cx, cy, r + 1, WHITE);
+  display.fillCircle(cx + r / 3 + 1, cy - r / 4, r, BLACK);
+}
 
-  char buf[12];
-  strftime(buf, sizeof(buf), "%H:%M:%S", &t);
+// ── Expression drawers ────────────────────────────────────────────────────────
 
+void exprFront(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 0, bp);
+}
+
+void exprNarrow(int bp) {
+  drawEyeStd(LEX, EY, EW, 3, PR - 3, 0, 0, bp);
+  drawEyeStd(REX, EY, EW, 3, PR - 3, 0, 0, bp);
+}
+
+void exprWide(int bp) {
+  drawEyeStd(LEX, EY, EW + 4, EH + 4, PR + 2, 0, 0, bp);
+  drawEyeStd(REX, EY, EW + 4, EH + 4, PR + 2, 0, 0, bp);
+}
+
+void exprCrossed(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR,  5, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, -5, 0, bp);
+}
+
+void exprMiddle(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR,  3, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, -3, 0, bp);
+}
+
+void exprDown(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 4, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 4, bp);
+}
+
+void exprUp(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, -4, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, -4, bp);
+}
+
+void exprRight(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 5, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 5, 0, bp);
+}
+
+void exprRightDown(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 4, 3, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 4, 3, bp);
+}
+
+void exprRightUp(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 4, -3, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 4, -3, bp);
+}
+
+void exprLeft(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, -5, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, -5, 0, bp);
+}
+
+void exprLeftDown(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, -4, 3, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, -4, 3, bp);
+}
+
+void exprLeftUp(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, -4, -3, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, -4, -3, bp);
+}
+
+void exprConfused1(int bp) {
+  // Left eye looks up-left, right eye looks down-right
+  drawEyeStd(LEX, EY, EW, EH, PR, -3, -4, bp);
+  drawEyeStd(REX, EY, EW, EH, PR,  3,  4, bp);
+}
+
+void exprConfused2(int bp) {
+  // One eye wide open, other eye squinting
+  drawEyeStd(LEX, EY, EW + 3, EH + 3, PR + 1, -3, 0, bp);
+  drawEyeStd(REX, EY, EW,     3,       PR - 4,  3, 0, bp);
+}
+
+void exprCry(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, -2, 2, bp);
+  drawEyeStd(REX, EY, EW, EH, PR,  2, 2, bp);
+  drawTear(LEX - 3, EY + EH + 1);
+  drawTear(LEX + 4, EY + EH + 2);
+  drawTear(REX - 4, EY + EH + 2);
+  drawTear(REX + 3, EY + EH + 1);
+}
+
+void exprDistressed(int bp) {
+  drawEyeStd(LEX, EY, EW, 5, PR - 2,  3, 2, bp);
+  drawEyeStd(REX, EY, EW, 5, PR - 2, -3, 2, bp);
+  // sweat drops on outer sides
+  for (int i = 0; i < 5; i++) {
+    display.drawPixel(LEX - EW - 4, EY - 1 + i, WHITE);
+    display.drawPixel(REX + EW + 4, EY - 1 + i, WHITE);
+  }
+  display.drawPixel(LEX - EW - 3, EY + 4, WHITE);
+  display.drawPixel(REX + EW + 3, EY + 4, WHITE);
+}
+
+void exprGlare(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 3, 0);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 3, 0);
+  // Mask top half of each eye — intense stare
+  display.fillRect(LEX - EW, EY - EH, EW * 2 + 1, EH / 2 + 2, BLACK);
+  display.fillRect(REX - EW, EY - EH, EW * 2 + 1, EH / 2 + 2, BLACK);
+}
+
+void exprMad(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 2, 0);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 2, 0);
+  // Left eye: inner (right/nose) corner drops — angry V
+  display.fillTriangle(LEX - EW - 1, EY - EH - 1,
+                       LEX + EW + 1, EY - EH - 1,
+                       LEX + EW + 1, EY - EH / 3, BLACK);
+  // Right eye: inner (left/nose) corner drops
+  display.fillTriangle(REX - EW - 1, EY - EH - 1,
+                       REX + EW + 1, EY - EH - 1,
+                       REX - EW - 1, EY - EH / 3, BLACK);
+}
+
+void exprGlasses(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 0, bp);
+  display.drawEllipse(LEX, EY, EW + 3, EH + 3, WHITE);
+  display.drawEllipse(REX, EY, EW + 3, EH + 3, WHITE);
+  // Bridge between lenses
+  display.drawLine(LEX + EW + 3, EY, REX - EW - 3, EY, WHITE);
+  // Side arms
+  display.drawLine(LEX - EW - 3, EY - 1, LEX - EW - 8, EY + 4, WHITE);
+  display.drawLine(REX + EW + 3, EY - 1, REX + EW + 8, EY + 4, WHITE);
+}
+
+void exprSleep(int bp) {
+  // Bottom arc only — like closed "smile" eyes
+  display.fillEllipse(LEX, EY + 2, EW, EH / 2 + 2, WHITE);
+  display.fillRect(LEX - EW - 1, EY - EH - 1, EW * 2 + 3, EH + 4, BLACK);
+  display.fillEllipse(REX, EY + 2, EW, EH / 2 + 2, WHITE);
+  display.fillRect(REX - EW - 1, EY - EH - 1, EW * 2 + 3, EH + 4, BLACK);
+  // ZZZ floating up
   display.setTextSize(1);
   display.setTextColor(WHITE);
-  display.setCursor(36, 54);
-  display.print(buf);
+  display.setCursor(57, 20); display.print("z");
+  display.setCursor(64, 13); display.print("z");
+  display.setCursor(72, 6);  display.print("Z");
 }
 
-// ---- OTA via GitHub releases ----
+void exprTired(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 3, 0);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 3, 0);
+  // Heavy drooping upper lids
+  display.fillRect(LEX - EW, EY - EH, EW * 2 + 1, EH / 2 + 3, BLACK);
+  display.fillRect(REX - EW, EY - EH, EW * 2 + 1, EH / 2 + 3, BLACK);
+}
+
+void exprNight(int bp) {
+  drawCrescent(LEX, EY, EH);
+  drawCrescent(REX, EY, EH);
+}
+
+void exprUpperLids(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 0, bp);
+  display.fillRect(LEX - EW, EY - EH, EW * 2 + 1, EH / 3 + 1, BLACK);
+  display.fillRect(REX - EW, EY - EH, EW * 2 + 1, EH / 3 + 1, BLACK);
+}
+
+void exprLowerLids(int bp) {
+  drawEyeStd(LEX, EY, EW, EH, PR, 0, 0, bp);
+  drawEyeStd(REX, EY, EW, EH, PR, 0, 0, bp);
+  display.fillRect(LEX - EW, EY + EH / 2, EW * 2 + 1, EH / 3 + 1, BLACK);
+  display.fillRect(REX - EW, EY + EH / 2, EW * 2 + 1, EH / 3 + 1, BLACK);
+}
+
+void exprBlank(int bp) {
+  // Pure white ellipses, no pupils — vacant stare
+  display.fillEllipse(LEX, EY, EW, EH, WHITE);
+  display.fillEllipse(REX, EY, EW, EH, WHITE);
+}
+
+void exprWordHello() {
+  display.setTextSize(3);
+  display.setTextColor(WHITE);
+  display.setCursor(8, 18);
+  display.print("HELLO");
+}
+
+void exprWordBye() {
+  display.setTextSize(3);
+  display.setTextColor(WHITE);
+  display.setCursor(18, 18);
+  display.print("BYE");
+}
+
+void exprWordWhat() {
+  display.setTextSize(2);
+  display.setTextColor(WHITE);
+  display.setCursor(20, 22);
+  display.print("What?");
+}
+
+// ── Dispatcher ────────────────────────────────────────────────────────────────
+
+void drawExpression(int blinkPct) {
+  display.clearDisplay();
+  switch (currentExpr) {
+    case EXPR_FRONT:      exprFront(blinkPct);      break;
+    case EXPR_NARROW:     exprNarrow(blinkPct);     break;
+    case EXPR_WIDE:       exprWide(blinkPct);       break;
+    case EXPR_CROSSED:    exprCrossed(blinkPct);    break;
+    case EXPR_MIDDLE:     exprMiddle(blinkPct);     break;
+    case EXPR_DOWN:       exprDown(blinkPct);       break;
+    case EXPR_UP:         exprUp(blinkPct);         break;
+    case EXPR_RIGHT:      exprRight(blinkPct);      break;
+    case EXPR_RIGHT_DOWN: exprRightDown(blinkPct);  break;
+    case EXPR_RIGHT_UP:   exprRightUp(blinkPct);    break;
+    case EXPR_LEFT:       exprLeft(blinkPct);       break;
+    case EXPR_LEFT_DOWN:  exprLeftDown(blinkPct);   break;
+    case EXPR_LEFT_UP:    exprLeftUp(blinkPct);     break;
+    case EXPR_CONFUSED1:  exprConfused1(blinkPct);  break;
+    case EXPR_CONFUSED2:  exprConfused2(blinkPct);  break;
+    case EXPR_CRY:        exprCry(blinkPct);        break;
+    case EXPR_DISTRESSED: exprDistressed(blinkPct); break;
+    case EXPR_GLARE:      exprGlare(blinkPct);      break;
+    case EXPR_MAD:        exprMad(blinkPct);        break;
+    case EXPR_GLASSES:    exprGlasses(blinkPct);    break;
+    case EXPR_SLEEP:      exprSleep(blinkPct);      break;
+    case EXPR_TIRED:      exprTired(blinkPct);      break;
+    case EXPR_NIGHT:      exprNight(blinkPct);      break;
+    case EXPR_UPPER_LIDS: exprUpperLids(blinkPct);  break;
+    case EXPR_LOWER_LIDS: exprLowerLids(blinkPct);  break;
+    case EXPR_BLANK:      exprBlank(blinkPct);      break;
+    case EXPR_WORD_HELLO: exprWordHello();           break;
+    case EXPR_WORD_BYE:   exprWordBye();             break;
+    case EXPR_WORD_WHAT:  exprWordWhat();            break;
+    default:              exprFront(blinkPct);       break;
+  }
+}
+
+// ── Animation scheduler ───────────────────────────────────────────────────────
+
+void pickNextExpression() {
+  int r = random(100);
+
+  if (r < 40) {
+    // Look directions — most common
+    const Expression looks[] = {
+      EXPR_FRONT, EXPR_LEFT, EXPR_RIGHT, EXPR_UP, EXPR_DOWN,
+      EXPR_LEFT_UP, EXPR_LEFT_DOWN, EXPR_RIGHT_UP, EXPR_RIGHT_DOWN, EXPR_MIDDLE
+    };
+    currentExpr = looks[random(10)];
+    exprDur = random(1000, 3000);
+
+  } else if (r < 60) {
+    // Emotions
+    const Expression emotions[] = {
+      EXPR_MAD, EXPR_CRY, EXPR_GLARE, EXPR_DISTRESSED,
+      EXPR_CONFUSED1, EXPR_CONFUSED2, EXPR_TIRED
+    };
+    currentExpr = emotions[random(7)];
+    exprDur = random(2000, 4000);
+
+  } else if (r < 80) {
+    // Funny / special looks
+    const Expression funny[] = {
+      EXPR_GLASSES, EXPR_CROSSED, EXPR_BLANK, EXPR_NIGHT,
+      EXPR_UPPER_LIDS, EXPR_LOWER_LIDS, EXPR_NARROW, EXPR_WIDE
+    };
+    currentExpr = funny[random(8)];
+    exprDur = random(1500, 3000);
+
+  } else if (r < 93) {
+    // Word reactions
+    const Expression words[] = { EXPR_WORD_HELLO, EXPR_WORD_BYE, EXPR_WORD_WHAT };
+    currentExpr = words[random(3)];
+    exprDur = 1800;
+
+  } else {
+    // Sleep — rare, held longer
+    currentExpr = EXPR_SLEEP;
+    exprDur = random(4000, 7000);
+  }
+
+  exprStart = millis();
+}
+
+// ── OTA via GitHub releases ───────────────────────────────────────────────────
+
 void checkForUpdate() {
   WiFiClientSecure client;
   client.setInsecure();
@@ -92,9 +401,8 @@ void checkForUpdate() {
   if (deserializeJson(doc, body)) return;
 
   String tag = doc["tag_name"].as<String>();
-  if (tag == String(FIRMWARE_VERSION)) return;  // already up to date
+  if (tag == String(FIRMWARE_VERSION)) return;
 
-  // find .bin in assets
   String binUrl;
   for (JsonObject asset : doc["assets"].as<JsonArray>()) {
     String name = asset["name"].as<String>();
@@ -105,7 +413,6 @@ void checkForUpdate() {
   }
   if (binUrl.isEmpty()) return;
 
-  // download & flash — follow GitHub redirects
   WiFiClientSecure dl;
   dl.setInsecure();
   HTTPClient dlHttp;
@@ -114,17 +421,10 @@ void checkForUpdate() {
   if (!dlHttp.begin(dl, binUrl)) return;
 
   int dlCode = dlHttp.GET();
-  Serial.printf("OTA download HTTP code: %d\n", dlCode);
   if (dlCode != 200) { dlHttp.end(); return; }
 
   int len = dlHttp.getSize();
-  Serial.printf("OTA firmware size: %d\n", len);
-
-  if (!Update.begin(len > 0 ? len : UPDATE_SIZE_UNKNOWN)) {
-    Serial.println("OTA Update.begin failed");
-    dlHttp.end();
-    return;
-  }
+  if (!Update.begin(len > 0 ? len : UPDATE_SIZE_UNKNOWN)) { dlHttp.end(); return; }
 
   display.clearDisplay();
   display.setTextSize(1);
@@ -133,32 +433,24 @@ void checkForUpdate() {
   display.print("Updating firmware...");
   display.display();
 
-  size_t written = Update.writeStream(*dlHttp.getStreamPtr());
-  Serial.printf("OTA written: %d bytes\n", written);
+  Update.writeStream(*dlHttp.getStreamPtr());
   dlHttp.end();
 
-  if (Update.end(true)) {
-    Serial.println("OTA success - rebooting");
-    ESP.restart();
-  } else {
-    Serial.printf("OTA failed: %s\n", Update.errorString());
-  }
+  if (Update.end(true)) ESP.restart();
 }
 
-// ---- Setup ----
+// ── Setup ─────────────────────────────────────────────────────────────────────
+
 void initVariant() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); // disable before framework init
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 }
 
 void setup() {
   Serial.begin(115200);
 
-  // Try 0x3C first, then 0x3D
   bool oledOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   if (!oledOk) oledOk = display.begin(SSD1306_SWITCHCAPVCC, 0x3D);
-  if (!oledOk) {
-    Serial.println("OLED not found on 0x3C or 0x3D - running without display");
-  }
+  if (!oledOk) Serial.println("OLED not found");
 
   display.clearDisplay();
   display.setTextColor(WHITE);
@@ -179,61 +471,87 @@ void setup() {
     delay(1500);
     checkForUpdate();
 
+    // Web UI — main page with expression list
     server.on("/", []() {
-      server.send(200, "text/html",
-        "<h2>ESP32 Robot Eyes</h2>"
-        "<p><b>Version:</b> " FIRMWARE_VERSION "</p>"
-        "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>"
-        "<p><b>WiFi:</b> " + String(ssid) + "</p>"
-        "<br><form action='/update' method='get'>"
-        "<button type='submit' style='padding:10px 20px;font-size:16px'>Check for OTA Update</button></form>");
+      String html = "<h2>ESP32 Robot Eyes v" FIRMWARE_VERSION "</h2>";
+      html += "<p>IP: " + WiFi.localIP().toString() + "</p>";
+      html += "<p>Expression: <b>" + String(exprNames[currentExpr]) + "</b></p>";
+      html += "<h3>Trigger expression:</h3><ul>";
+      for (int i = 0; i < EXPR_COUNT; i++) {
+        html += "<li><a href='/expr?id=" + String(i) + "'>" + String(exprNames[i]) + "</a></li>";
+      }
+      html += "</ul>";
+      html += "<br><a href='/update'>Check OTA Update</a>";
+      server.send(200, "text/html", html);
     });
+
+    server.on("/expr", []() {
+      if (server.hasArg("id")) {
+        int id = server.arg("id").toInt();
+        if (id >= 0 && id < EXPR_COUNT) {
+          currentExpr = (Expression)id;
+          exprStart   = millis();
+          exprDur     = 5000;
+        }
+      }
+      server.sendHeader("Location", "/");
+      server.send(302, "text/plain", "");
+    });
+
     server.on("/update", []() {
       server.send(200, "text/plain", "Checking for update...");
       checkForUpdate();
     });
+
     server.begin();
-    Serial.println("Web server started at http://" + WiFi.localIP().toString());
+    Serial.println("Web server: http://" + WiFi.localIP().toString());
   }
 
+  // Start with HELLO greeting
+  currentExpr  = EXPR_WORD_HELLO;
+  exprStart    = millis();
+  exprDur      = 2000;
   lastBlink    = millis();
-  lastLook     = millis();
   lastOtaCheck = millis();
 }
 
-// ---- Loop ----
+// ── Loop ──────────────────────────────────────────────────────────────────────
+
 void loop() {
   unsigned long now = millis();
 
-  // trigger blink
-  if (!blinking && now - lastBlink > (unsigned long)random(3000, 6000)) {
+  // Advance expression when timer expires
+  if (now - exprStart > exprDur) {
+    pickNextExpression();
+  }
+
+  // Blink (skip during sleep, night, and word expressions)
+  bool canBlink = (currentExpr != EXPR_SLEEP &&
+                   currentExpr != EXPR_NIGHT &&
+                   currentExpr != EXPR_WORD_HELLO &&
+                   currentExpr != EXPR_WORD_BYE &&
+                   currentExpr != EXPR_WORD_WHAT);
+
+  if (!blinking && canBlink && now - lastBlink > (unsigned long)random(3000, 6000)) {
     blinking   = true;
     blinkFrame = 0;
-    lastBlink  = now;
   }
 
-  // random look direction
-  if (now - lastLook > (unsigned long)random(2000, 5000)) {
-    pupilDX = random(-5, 6);
-    pupilDY = random(-3, 4);
-    lastLook = now;
-  }
-
-  // blink animation (frame 0-9)
   int blinkPct = 0;
   if (blinking) {
     blinkPct = (blinkFrame < 5) ? blinkFrame * 2 : (10 - blinkFrame) * 2;
     blinkFrame++;
-    if (blinkFrame >= 10) blinking = false;
+    if (blinkFrame >= 10) {
+      blinking  = false;
+      lastBlink = now;
+    }
   }
 
-  drawFace(blinkPct);
-  drawTime();
+  drawExpression(blinkPct);
   display.display();
 
   server.handleClient();
 
-  // OTA check every hour
   if (now - lastOtaCheck > 3600000UL) {
     if (WiFi.status() == WL_CONNECTED) checkForUpdate();
     lastOtaCheck = now;
