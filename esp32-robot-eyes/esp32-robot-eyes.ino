@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <WebServer.h>
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 #include <Adafruit_GFX.h>
@@ -15,7 +16,7 @@
 #define OLED_RESET     -1
 #define OLED_ADDRESS 0x3C
 
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.0.1"
 #define GITHUB_USER      "IamFishR"
 #define GITHUB_REPO      "esp32-robot-eyes"
 
@@ -23,6 +24,7 @@ const char* ssid     = "Airtel_ratn_1517";
 const char* password = "air52651";
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+WebServer server(80);
 
 // ---- Eye state ----
 int pupilDX = 0, pupilDY = 0;
@@ -96,7 +98,7 @@ void checkForUpdate() {
   String binUrl;
   for (JsonObject asset : doc["assets"].as<JsonArray>()) {
     String name = asset["name"].as<String>();
-    if (name.endsWith(".bin")) {
+    if (name == "firmware.bin") {
       binUrl = asset["browser_download_url"].as<String>();
       break;
     }
@@ -159,10 +161,24 @@ void setup() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    // IST = UTC + 5h30m = 19800 s
     configTime(19800, 0, "pool.ntp.org", "time.google.com");
     delay(1500);
     checkForUpdate();
+
+    server.on("/", []() {
+      server.send(200, "text/html",
+        "<h2>ESP32 Robot Eyes</h2>"
+        "<p>Version: " FIRMWARE_VERSION "</p>"
+        "<p>IP: " + WiFi.localIP().toString() + "</p>"
+        "<form action='/update' method='get'>"
+        "<button type='submit'>Check for OTA Update</button></form>");
+    });
+    server.on("/update", []() {
+      server.send(200, "text/plain", "Checking for update...");
+      checkForUpdate();
+    });
+    server.begin();
+    Serial.println("Web server started at http://" + WiFi.localIP().toString());
   }
 
   lastBlink    = millis();
@@ -199,6 +215,8 @@ void loop() {
   drawFace(blinkPct);
   drawTime();
   display.display();
+
+  server.handleClient();
 
   // OTA check every hour
   if (now - lastOtaCheck > 3600000UL) {
