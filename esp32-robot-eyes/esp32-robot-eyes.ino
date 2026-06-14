@@ -16,7 +16,7 @@
 #define OLED_RESET     -1
 #define OLED_ADDRESS 0x3C
 
-#define FIRMWARE_VERSION "1.0.1"
+#define FIRMWARE_VERSION "1.0.2"
 #define GITHUB_USER      "IamFishR"
 #define GITHUB_REPO      "esp32-robot-eyes"
 
@@ -168,10 +168,11 @@ void setup() {
     server.on("/", []() {
       server.send(200, "text/html",
         "<h2>ESP32 Robot Eyes</h2>"
-        "<p>Version: " FIRMWARE_VERSION "</p>"
-        "<p>IP: " + WiFi.localIP().toString() + "</p>"
-        "<form action='/update' method='get'>"
-        "<button type='submit'>Check for OTA Update</button></form>");
+        "<p><b>Version:</b> " FIRMWARE_VERSION "</p>"
+        "<p><b>IP:</b> " + WiFi.localIP().toString() + "</p>"
+        "<p><b>WiFi:</b> " + String(ssid) + "</p>"
+        "<br><form action='/update' method='get'>"
+        "<button type='submit' style='padding:10px 20px;font-size:16px'>Check for OTA Update</button></form>");
     });
     server.on("/update", []() {
       server.send(200, "text/plain", "Checking for update...");
